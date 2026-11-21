@@ -66,13 +66,14 @@ func WithHTTPClient(c *http.Client) Option {
 func withClock(now func() time.Time) Option { return func(m *Manager) { m.now = now } }
 
 type Manager struct {
-	mu        sync.Mutex
-	storePath string
-	client    *http.Client
-	endpoints Endpoints
-	now       func() time.Time
-	stored    store
-	pending   map[string]authorizationAttempt
+	mu          sync.Mutex
+	storePath   string
+	client      *http.Client
+	endpoints   Endpoints
+	now         func() time.Time
+	stored      store
+	savePending bool // Credentials in memory must be persisted before use.
+	pending     map[string]authorizationAttempt
 }
 
 type store struct {
@@ -157,6 +158,7 @@ func (m *Manager) load() error {
 }
 
 func (m *Manager) saveLocked() error {
+	m.savePending = true
 	dir := filepath.Dir(m.storePath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("chatgpt plan: create token directory: %w", err)
@@ -193,6 +195,7 @@ func (m *Manager) saveLocked() error {
 		return fmt.Errorf("chatgpt plan: replace token store: %w", err)
 	}
 	ok = true
+	m.savePending = false
 	return nil
 }
 
@@ -414,6 +417,13 @@ func (m *Manager) Status() Status {
 func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The issuer may already have consumed the old refresh token. Retry the
+	// local write before returning a cached token or requesting another one.
+	if m.savePending {
+		if err := m.saveLocked(); err != nil {
+			return "", err
+		}
+	}
 	a := m.stored.Account
 	if a == nil || a.RefreshToken == "" || !hasScope(a.Scope, requiredScope) {
 		return "", errors.New("chatgpt plan: no connected ChatGPT account")
