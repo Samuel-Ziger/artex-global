@@ -32,6 +32,7 @@ func TestOAuthRefreshModelsAndDisconnect(t *testing.T) {
 		nonce          string
 		issuer         string
 		refreshSeen    string
+		refreshCalls   int
 		revocationSeen string
 	)
 
@@ -68,6 +69,7 @@ func TestOAuthRefreshModelsAndDisconnect(t *testing.T) {
 				})
 			case "refresh_token":
 				mu.Lock()
+				refreshCalls++
 				refreshSeen = r.Form.Get("refresh_token")
 				mu.Unlock()
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -138,8 +140,23 @@ func TestOAuthRefreshModelsAndDisconnect(t *testing.T) {
 		t.Fatalf("first token = %q, %v", token, err)
 	}
 	now = now.Add(2 * time.Hour)
+	// The parent is a regular file. Persistence fails even when run as root.
+	m.storePath = filepath.Join(storePath, "unwritable")
+	for attempt := 1; attempt <= 2; attempt++ {
+		if token, err := m.AccessToken(context.Background()); err == nil || token != "" {
+			t.Fatalf("attempt %d returned an unpersisted token or no error", attempt)
+		}
+	}
+	m.storePath = storePath
 	if token, err := m.AccessToken(context.Background()); err != nil || token != "access-two" {
 		t.Fatalf("refreshed token = %q, %v", token, err)
+	}
+	reloaded, err := New(storePath, withClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := reloaded.stored.Account; a == nil || a.AccessToken != "access-two" || a.RefreshToken != "refresh-two" {
+		t.Fatal("rotated credentials were not persisted before the access token was returned")
 	}
 	models, err := m.Models(context.Background())
 	if err != nil || len(models) != 1 || models[0].Slug != "gpt-plan" {
@@ -152,6 +169,9 @@ func TestOAuthRefreshModelsAndDisconnect(t *testing.T) {
 	defer mu.Unlock()
 	if refreshSeen != "refresh-one" {
 		t.Errorf("refresh token used = %q", refreshSeen)
+	}
+	if refreshCalls != 1 {
+		t.Errorf("refresh requests = %d, want 1", refreshCalls)
 	}
 	if revocationSeen != "refresh-two:refresh_token" {
 		t.Errorf("revocation = %q", revocationSeen)
